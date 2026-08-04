@@ -139,6 +139,7 @@ export function buildGrokArgs(cwd, options = {}) {
     args.push("--always-approve");
   } else {
     args.push("--permission-mode", "plan");
+    args.push("--sandbox", "read-only");
   }
 
   if (options.resumeSessionId) {
