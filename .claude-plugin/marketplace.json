@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Grok Build CLI plugin for Claude Code. claude grok, grok claude code, image generation, vision, delegate, review. Supports TTS, STT and more.",
-    "version": "1.0.9"
+    "version": "1.0.10"
   },
   "plugins": [
     {
       "name": "grok",
       "description": "Use Grok in Claude Code. Image generation, vision, TTS, delegate, review and more. claude grok plugin, grok claude code.",
-      "version": "1.0.9",
+      "version": "1.0.10",
       "author": {
         "name": "Lee HanSol"
       },

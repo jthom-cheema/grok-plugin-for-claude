@@ -1,6 +1,6 @@
 # Grok Plugin for Claude Code | Use Grok in Claude Code
 
-**Current version: 1.0.9**
+**Current version: 1.0.10**
 
 Use [Grok Build CLI](https://x.ai/cli) from inside Claude Code. 
 

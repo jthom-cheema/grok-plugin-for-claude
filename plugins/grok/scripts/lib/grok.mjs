@@ -194,6 +194,10 @@ export function interpretGrokResult({ stdout = "", stderr = "", status = 1 } = {
 }
 
 export function runGrokTurn(cwd, options = {}) {
+  if (!cwd || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
+    throw new Error(`Workspace root does not exist or is not a directory: ${cwd}`);
+  }
+
   let promptFile = options.promptFile ?? null;
   let cleanupPrompt = null;
 

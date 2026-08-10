@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.10 — 2026-08-10
+
+**Reliability**
+- `runGrokTurn` now validates the workspace root before spawning Grok: a nonexistent or non-directory `cwd` fails fast with a clear `Workspace root does not exist or is not a directory: <path>` error instead of a misleading `spawnSync grok.exe ENOENT` that appears to implicate the binary (see `FINDINGS.md` GROK-001, [openai/codex-plugin-cc#631](https://github.com/openai/codex-plugin-cc/issues/631))
+- State root is now namespaced under `<CLAUDE_PLUGIN_DATA>/grok/state` instead of `<CLAUDE_PLUGIN_DATA>/state`, so another companion-family plugin sharing the same generic data directory can no longer collide with this fork's `state.json` and job files
+- `session-lifecycle-hook.mjs` now exports the plugin-data path as `GROK_PLUGIN_DATA` instead of re-exporting the generic `CLAUDE_PLUGIN_DATA` into the shared `$CLAUDE_ENV_FILE`, so multiple companion-family plugins stop fighting over one variable; `resolveStateDir` prefers `GROK_PLUGIN_DATA` when set and falls back to `CLAUDE_PLUGIN_DATA` for compatibility
+- This is an intentional state-location reset, not a bug: upgrading moves the state root from `<data>/state` to `<data>/grok/state`. Prior job history at the old location is deliberately left in place and not migrated — the old directory can contain a foreign plugin's live state, and this fork stores no user config there (`defaultState().config` is empty) — so job listings simply start fresh after upgrade
+
 ## 1.0.9 — 2026-07-10
 
 **Model selection follows the Grok Build CLI default (Grok 4.5)**

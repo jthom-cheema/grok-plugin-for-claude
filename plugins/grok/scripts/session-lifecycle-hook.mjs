@@ -9,6 +9,11 @@
 // The value is appended to $CLAUDE_ENV_FILE, which Claude Code sources for the
 // main session and every subagent Bash call, so the id is stable across the
 // delegate subagent boundary.
+//
+// The plugin-data path is re-exported under the fork-specific name
+// GROK_PLUGIN_DATA (instead of the generic CLAUDE_PLUGIN_DATA) so that other
+// companion-family plugins sharing this codebase stop overwriting each
+// other's state root in the shared env file.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -17,6 +22,7 @@ import { fileURLToPath } from "node:url";
 
 export const SESSION_ID_ENV = "GROK_COMPANION_SESSION_ID";
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
+const FORK_PLUGIN_DATA_ENV = "GROK_PLUGIN_DATA";
 
 function readHookInput() {
   try {
@@ -40,7 +46,7 @@ export function appendEnvVar(name, value) {
 
 export function handleSessionStart(input) {
   appendEnvVar(SESSION_ID_ENV, input.session_id);
-  appendEnvVar(PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
+  appendEnvVar(FORK_PLUGIN_DATA_ENV, process.env[PLUGIN_DATA_ENV]);
 }
 
 async function main() {
