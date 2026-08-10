@@ -4,6 +4,71 @@ Defect and reliability findings observed while running this plugin inside the Ch
 
 ---
 
+## GROK-004: `state.json` is an unlocked multi-process read-modify-write; concurrent writers can lose updates
+
+- Date recorded: 2026-08-10 (surfaced by cross-family review during GROK-002; the same mechanism underlies the cross-plugin clobber risk reported in [openai/codex-plugin-cc#631](https://github.com/openai/codex-plugin-cc/issues/631))
+- Status: open
+- Environment: same as GROK-001
+
+### Defect
+
+Every writer of the per-workspace `state.json` index (`upsertJob` in `plugins/grok/scripts/lib/state.mjs`) does an unlocked load-modify-save of the whole file. Any two processes writing concurrently (a dispatching parent and a running worker, workers of two parallel jobs, `cancel` racing a worker's completion write) can interleave between one another's load and save, and the later save silently discards the earlier one's update. The per-job `jobs/<id>.json` files have a single writer at any given moment under current code paths and are not affected the same way; the shared index is.
+
+1.0.11 avoids ADDING any instance of this race (the dispatch parent no longer writes anything after a successful spawn), but the underlying architecture is unchanged and pre-existing.
+
+### Candidate fix
+
+Make the per-job files the source of truth and derive listings by scanning `jobs/` (the index becomes a cache or disappears), or serialize index writes with an advisory lock file. Queued for a future release; pairs naturally with GROK-003's liveness reconciliation.
+
+---
+
+## GROK-003: job listings have no PID-liveness reconciliation; a worker that dies after starting leaves a stale queued/running record
+
+- Date recorded: 2026-08-10 (surfaced by cross-family review during GROK-002)
+- Status: open
+- Environment: same as GROK-001
+
+### Defect
+
+Once a background worker has started, a crash before `runTrackedJob` takes over (module-load failure, OOM kill, external termination) leaves the job record in `queued` or `running` with a recorded pid and nothing ever reconciles it: the status pathway (`plugins/grok/scripts/lib/job-control.mjs`) lists jobs from the state file without checking whether the recorded pid is still alive. The 1.0.11 fixes cover launch-time failures (bad cwd, spawn error); this entry covers death after a successful launch. Same operational lesson as GROK-001/002: bookkeeping that says "running" is not process evidence.
+
+### Candidate fix
+
+Status/result listing checks pid liveness for jobs in non-terminal phases and marks stale ones failed (with a log line noting the reconciliation), or the worker stamps a heartbeat the lister can age out. Not shipped in 1.0.11; queued for a future release.
+
+---
+
+## GROK-002: `--background` task dispatch with a bad cwd dies silently, leaving a permanently queued job
+
+- Date recorded: 2026-08-10 (residual identified during GROK-001 review, both reviewers concurred)
+- Status: fixed in 1.0.11
+- Environment: same as GROK-001
+
+### Defect
+
+`spawnDetachedTaskWorker` (`plugins/grok/scripts/grok-companion.mjs`) passes the raw job cwd into an async detached `spawn(process.execPath, [... "task-worker" ...], { cwd, detached: true, stdio: "ignore" })` followed by `child.unref()`, with no `error` listener. `enqueueBackgroundTask` then writes the job record with `status: "queued"`. When the cwd does not exist, the spawn's failure surfaces only as an async `error` event after the queued record is already written and the CLI is exiting: the worker never starts, nothing marks the job failed, and the job sits queued forever.
+
+The 1.0.10 guard in `runGrokTurn` does not cover this: it lives inside the code the detached worker would run, and with a bad cwd the worker never launches at all. A background job that dies silently while its bookkeeping says "queued" is precisely the failure class GROK-001's incident history warns about: launch claims are not evidence of a running job.
+
+### Fix (1.0.11)
+
+The workspace-root guard is extracted into a shared `assertWorkspaceRoot(cwd)` helper (same error text as 1.0.10: `Workspace root does not exist or is not a directory: <path>`) and applied at three levels:
+
+1. `handleTask` validates the cwd before any job record or log file is created, so both foreground and `--background` dispatches with a bad cwd exit nonzero with the clear error and write no state at all.
+2. `spawnDetachedTaskWorker` calls the guard before spawning, as defense in depth for any other caller.
+3. `runGrokTurn` keeps its guard via the shared helper (behavior unchanged from 1.0.10).
+
+Cross-family review of the fix surfaced two adjacent defects in the same silent-death class, folded into 1.0.11:
+
+4. `enqueueBackgroundTask` previously spawned the detached worker BEFORE persisting the queued job record; a worker that won the race would exit `No stored job found` with stdio ignored and the parent would then record a queued job for a dead worker. The queued record is now persisted before the spawn, and the parent performs no write of any kind after a successful spawn: the worker's first `runTrackedJob` write stamps `status: running` and `pid: process.pid` into both the job file and the state index, so until the worker proves itself alive the index honestly shows queued with a null pid.
+5. Launch failures now fail loud through a single `markLaunchFailed` path: an `error` listener on the detached child catches async spawn failures (EPERM, EMFILE, resource exhaustion), and a try/catch around the spawn call catches synchronous throws (the TOCTOU where cwd vanishes between the dispatch gate and the spawn). Both append the failure to the job log, persist the job as failed, and the sync path rethrows so the CLI exits nonzero. These writes are safe against worker clobber by construction: both paths fire only when the worker process never started.
+
+### Verification
+
+CLI-level regression test: `task --background` with a nonexistent cwd exits nonzero, prints the workspace-root error, and leaves the plugin data directory empty (no state dir, no job file, no log). Positive path re-confirmed live: a valid `--background` dispatch queues, the detached worker runs, and the job completes with its result collectable.
+
+---
+
 ## GROK-001: delegate dispatch fails with `spawnSync grok.exe ENOENT` when the job cwd is a nonexistent path
 
 - Date observed: 2026-08-10

@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { runGrokTurn } from "../plugins/grok/scripts/lib/grok.mjs";
 import { resolveStateDir } from "../plugins/grok/scripts/lib/state.mjs";
+import { assertWorkspaceRoot } from "../plugins/grok/scripts/lib/workspace.mjs";
 import { handleSessionStart, SESSION_ID_ENV } from "../plugins/grok/scripts/session-lifecycle-hook.mjs";
 
 test("runGrokTurn throws synchronously when cwd does not exist", () => {
@@ -159,5 +160,50 @@ test("handleSessionStart exports GROK_PLUGIN_DATA and does not re-export CLAUDE_
     if (fs.existsSync(envFile)) {
       fs.unlinkSync(envFile);
     }
+  }
+});
+
+test("assertWorkspaceRoot does not throw for a real directory", () => {
+  assert.doesNotThrow(() => assertWorkspaceRoot(os.tmpdir()));
+});
+
+test("assertWorkspaceRoot throws for a nonexistent path", () => {
+  const missingCwd = path.join(os.tmpdir(), `grok-assert-missing-${process.pid}-${Date.now()}`);
+
+  assert.throws(
+    () => assertWorkspaceRoot(missingCwd),
+    (error) => {
+      assert.match(error.message, /Workspace root does not exist or is not a directory:/);
+      assert.match(error.message, new RegExp(missingCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      return true;
+    }
+  );
+});
+
+test("assertWorkspaceRoot throws for an empty string", () => {
+  assert.throws(
+    () => assertWorkspaceRoot(""),
+    (error) => {
+      assert.match(error.message, /Workspace root does not exist or is not a directory:/);
+      return true;
+    }
+  );
+});
+
+test("assertWorkspaceRoot throws when the path points at a file", () => {
+  const filePath = path.join(os.tmpdir(), `grok-assert-is-file-${process.pid}-${Date.now()}.txt`);
+  fs.writeFileSync(filePath, "not a directory", "utf8");
+
+  try {
+    assert.throws(
+      () => assertWorkspaceRoot(filePath),
+      (error) => {
+        assert.match(error.message, /Workspace root does not exist or is not a directory:/);
+        assert.match(error.message, new RegExp(filePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+        return true;
+      }
+    );
+  } finally {
+    fs.rmSync(filePath, { force: true });
   }
 });

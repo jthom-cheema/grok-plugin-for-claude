@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.11 — 2026-08-10
+
+**Reliability**
+- Background task dispatch (`task --background`) with a nonexistent workspace root now fails loud at dispatch — nonzero exit, clear error, no queued job record — instead of writing a `status: "queued"` job whose detached worker silently never started (see `FINDINGS.md` GROK-002)
+- The workspace-root guard is extracted into a shared `assertWorkspaceRoot` helper (`plugins/grok/scripts/lib/workspace.mjs`), used by `handleTask` (before any job/log creation, foreground and `--background` alike), `spawnDetachedTaskWorker` (defense in depth), and `runGrokTurn` (unchanged behavior from 1.0.10)
+- The queued job record for a background task is now persisted before the detached worker is spawned, closing a latent race where a fast worker could start, find no stored job for its `--job-id`, and exit silently (stdio is ignored for detached workers)
+- The detached worker's spawn is now watched with an `error` listener: if it fails to start for any reason, the job is marked `failed` with the error recorded in the job log instead of being left permanently `queued`
+
 ## 1.0.10 — 2026-08-10
 
 **Reliability**

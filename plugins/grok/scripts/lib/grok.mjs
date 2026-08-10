@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { createTempDir } from "./fs.mjs";
 import { binaryAvailable, runCommand } from "./process.mjs";
+import { assertWorkspaceRoot } from "./workspace.mjs";
 
 const AUTH_FILE = path.join(os.homedir(), ".grok", "auth.json");
 const DEFAULT_GROK_BIN_DIR = path.join(os.homedir(), ".grok", "bin");
@@ -194,9 +195,7 @@ export function interpretGrokResult({ stdout = "", stderr = "", status = 1 } = {
 }
 
 export function runGrokTurn(cwd, options = {}) {
-  if (!cwd || !fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
-    throw new Error(`Workspace root does not exist or is not a directory: ${cwd}`);
-  }
+  assertWorkspaceRoot(cwd);
 
   let promptFile = options.promptFile ?? null;
   let cleanupPrompt = null;

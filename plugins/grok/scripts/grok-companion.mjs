@@ -73,7 +73,7 @@ import {
   runTrackedJob,
   SESSION_ID_ENV
 } from "./lib/tracked-jobs.mjs";
-import { resolveWorkspaceRoot } from "./lib/workspace.mjs";
+import { assertWorkspaceRoot, resolveWorkspaceRoot } from "./lib/workspace.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 
@@ -423,6 +423,7 @@ async function runForegroundCommand(job, runner, options = {}) {
 }
 
 function spawnDetachedTaskWorker(cwd, jobId) {
+  assertWorkspaceRoot(cwd);
   const scriptPath = path.join(ROOT_DIR, "scripts", "grok-companion.mjs");
   const child = spawn(process.execPath, [scriptPath, "task-worker", "--cwd", cwd, "--job-id", jobId], {
     cwd,
@@ -439,18 +440,80 @@ function enqueueBackgroundTask(cwd, job, request) {
   const { logFile } = createTrackedProgress(job);
   appendLogLine(logFile, "Queued for background execution.");
 
-  const child = spawnDetachedTaskWorker(cwd, job.id);
+  // Persist the queued record BEFORE spawning the detached worker: the
+  // worker is detached and can start running immediately, and if it ever
+  // won a race against this write it would find no stored job
+  // (handleTaskWorker) and exit with stdio ignored, i.e. silently. Writing
+  // first (writeJobFile/upsertJob use synchronous fs calls) closes that
+  // window before spawnDetachedTaskWorker is even called.
   const queuedRecord = {
     ...job,
     status: "queued",
     phase: "queued",
-    pid: child.pid ?? null,
+    pid: null,
     logFile,
     request
   };
   writeJobFile(job.workspaceRoot, job.id, queuedRecord);
   upsertJob(job.workspaceRoot, queuedRecord);
 
+  // Safe to rewrite the whole job FILE from here: both a synchronous throw
+  // out of spawnDetachedTaskWorker (e.g. its internal assertWorkspaceRoot
+  // firing on a cwd that vanished between handleTask's gate and this spawn
+  // -- a real TOCTOU in worktree-teardown workflows) and the async child
+  // "error" event below can only occur when the worker process itself
+  // never started, so there is no worker-side write in flight or already
+  // persisted for this rewrite to clobber.
+  const markLaunchFailed = (error) => {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    appendLogLine(logFile, `Background worker failed to start: ${errorMessage}`);
+    const completedAt = nowIso();
+    const failedRecord = {
+      ...queuedRecord,
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      errorMessage,
+      completedAt
+    };
+    writeJobFile(job.workspaceRoot, job.id, failedRecord);
+    upsertJob(job.workspaceRoot, {
+      id: job.id,
+      status: "failed",
+      phase: "failed",
+      pid: null,
+      errorMessage,
+      completedAt
+    });
+  };
+
+  try {
+    const child = spawnDetachedTaskWorker(cwd, job.id);
+
+    // The parent does not exit before a queued spawn error can fire: Node
+    // always emits "error" asynchronously (never synchronously from spawn()
+    // itself), and child.unref() only excludes the child from keeping the
+    // event loop alive -- it does not detach listeners already attached to
+    // it. If the worker never starts, this is what marks the job failed
+    // instead of leaving it queued forever.
+    child.on("error", markLaunchFailed);
+  } catch (error) {
+    // A synchronous throw here (e.g. assertWorkspaceRoot inside
+    // spawnDetachedTaskWorker) happens after the queued record above was
+    // already persisted. Mark it failed instead of leaving an orphaned
+    // "queued" record with no failure marker, then rethrow so the CLI still
+    // exits nonzero with the clear message via main()'s catch.
+    markLaunchFailed(error);
+    throw error;
+  }
+
+  // The parent deliberately writes nothing after a successful spawn: a
+  // post-spawn upsertJob here would be an unlocked whole-state
+  // read-modify-write racing the worker's own index update. The worker's
+  // first runTrackedJob write stamps status "running" and pid
+  // process.pid into both the job file and the state index; until that
+  // happens the index honestly shows "queued" with pid null -- a pid is
+  // process evidence, and the parent has none to offer yet.
   return {
     payload: {
       jobId: job.id,
@@ -528,6 +591,7 @@ async function handleTask(argv) {
   });
 
   const cwd = resolveCommandCwd(options);
+  assertWorkspaceRoot(cwd);
   const workspaceRoot = resolveCommandWorkspace(options);
   const explicitModel = options.model ? String(options.model).trim() : null;
   const model = resolvePluginModel(workspaceRoot, explicitModel);

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -74,4 +76,31 @@ test("grok-companion setup exits successfully", () => {
 
   assert.equal(result.status, 0);
   assert.match(result.stdout, /Grok Setup/);
+});
+
+test("grok-companion task --background with a nonexistent cwd fails loud and writes no state", () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-bg-data-"));
+  const missingCwd = path.join(os.tmpdir(), `grok-bg-missing-cwd-${process.pid}-${Date.now()}`);
+
+  try {
+    const env = { ...process.env, GROK_PLUGIN_DATA: dataDir };
+    delete env.CLAUDE_PLUGIN_DATA;
+
+    const result = spawnSync(
+      process.execPath,
+      [COMPANION, "task", "--background", "--cwd", missingCwd, "probe"],
+      {
+        cwd: ROOT,
+        encoding: "utf8",
+        env
+      }
+    );
+
+    assert.notEqual(result.status, 0);
+    const combinedOutput = `${result.stdout}\n${result.stderr}`;
+    assert.match(combinedOutput, /Workspace root does not exist/);
+    assert.deepEqual(fs.readdirSync(dataDir), []);
+  } finally {
+    fs.rmSync(dataDir, { recursive: true, force: true });
+  }
 });
