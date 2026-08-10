@@ -10,6 +10,7 @@ Defect and reliability findings observed while running this plugin inside the Ch
 - Status: open
 - Environment: Windows 11 Pro 10.0.26200; plugin 1.0.9 (`grok-build-cheema`); grok CLI 0.2.118; binary `C:\Users\ThompsonJackCHEEMA\.grok\bin\grok.exe` (present on disk, 140,687,688 bytes, mtime 2026-08-03)
 - Claude Code session: `28af7513-cffa-47fa-a176-e3aa72046423` (automate-at-teamcheema)
+- Cross-reference: [openai/codex-plugin-cc#631](https://github.com/openai/codex-plugin-cc/issues/631), filed 2026-08-10 from the same session's evidence. The codex companion (same shared companion codebase, same `CLAUDE_PLUGIN_DATA` state contract as this fork) wrote its broker registration and all job state into this plugin's data directory.
 
 ### Reported symptom
 
