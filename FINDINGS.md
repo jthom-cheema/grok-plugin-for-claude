@@ -4,6 +4,64 @@ Defect and reliability findings observed while running this plugin inside the Ch
 
 ---
 
+## GROK-006: headless runs record narration-only output as a completed job — the CLI exits 0 at any no-tool-call assistant message
+
+- Date recorded: 2026-08-12
+- Status: mitigated in 1.0.12 (opt-in `--sentinel`); underlying CLI/model behavior is upstream (report to xai-org/grok-build drafted from this evidence)
+- Environment: Windows 11 Pro 10.0.26200; plugin 1.0.11; grok CLI 0.2.118 (shipped 2026-07-31); models grok-4.5 AND grok-4.6 (4.6 became this login's CLI default ~2026-08-12)
+- Claude Code session: `69a58c8f-4122-489f-8b37-20cb8a34ace1` (trailer-managment)
+
+### Defect
+
+The grok CLI's headless mode (`--prompt-file` / `-p, --single`) ends its agentic loop the moment the model emits an assistant message containing no tool call, prints that message, and exits 0. On complex multi-step briefs the model frequently narrates a plan ("I'll verify the fingerprint first, then...") without attaching the tool call; the CLI treats that narration as the final answer. The companion then faithfully records a `status: "completed"` job whose entire output is one planning sentence. Nothing in the exit status, job record, or log distinguishes this from a real completion.
+
+Probe matrix, 2026-08-12 (all on the same review-scale read-only brief unless noted):
+
+| Probe | Pathway | Model | Outcome |
+|---|---|---|---|
+| Single-turn text answer | direct | 4.6 | pass, seconds |
+| One-tool-call task (`git rev-parse HEAD`) | direct | 4.6 | pass, correct output + sentinel |
+| Review-scale brief | forwarder subagent | 4.6 | fail 49s, narration only |
+| Review-scale brief, `--effort high` | direct | 4.6 | fail 26s, narration only |
+| Review-scale brief + "first action must be a tool call" rule | direct | 4.6 | ran 12+ min (killed externally, unproven) |
+| Identical prompt, relaunched `--background` | direct | 4.6 | fail 8s, narration only |
+| Resume of that session with a continue nudge | direct | 4.6 | fail <30s, narrated again without a tool call |
+
+Same signature on grok-4.5 on 2026-08-10 (two probes) and in the original 2026-08-07 incident (three narration-only quits, different project). The trigger is nondeterministic — one attempt of the identical prompt ran long while the relaunch died in 8 seconds — so single-turn "sentinel probes" cannot certify this path healthy; only a real multi-tool-round job can.
+
+### Mitigation (1.0.12)
+
+`task --sentinel <text>` declares the brief's completion sentinel. After a run that exits 0 without the sentinel line-anchored in its output, the companion resumes the surviving session (`-r <sessionId>`) with a continue prompt that restates the tool-call rule, up to a hard cap of 2 resumes. If the sentinel still has not appeared, the job is marked **failed** with an explicit narration-only error — through the same `runTrackedJob` failure path used everywhere else, so foreground runs exit nonzero and background jobs surface `status: "failed"` with the reason in the job log. A silent "completed" without a declared sentinel's presence is no longer possible. Callers that do not pass `--sentinel` get unchanged behavior.
+
+### Verification
+
+Unit tests cover line-anchored sentinel matching (substring hits in prose do not count), the resume-prompt contract, and the cap constant. Live verification is the review-length job in the harness deviation's retirement condition: a review-scale `--sentinel DONE` run that completes with its sentinel (possibly via auto-resume), or fails loud — either outcome proves the silent path closed.
+
+---
+
+## GROK-005: unsupported effort levels fail with exit 0 and record the CLI error as a completed run's answer; support is model-dependent
+
+- Date recorded: 2026-08-12
+- Status: fixed in 1.0.12
+- Environment: same as GROK-006
+
+### Defect
+
+Two compounding problems, verified live against grok CLI 0.2.118 on 2026-08-12:
+
+1. Effort-level support varies by MODEL, not CLI version: `--effort xhigh` is accepted on grok-4.6 but rejected on grok-4.5 (`use one of: high, medium, low`); `--effort max` is rejected everywhere (`use one of: xhigh, high, medium, low` on 4.6). The plugin advertises and forwards all five levels (`low|medium|high|xhigh|max`) with no awareness of the target model.
+2. The CLI reports a rejected level with **exit 0** and the error as its only output — under `--output-format json` as `{"type":"error","message":"--effort/--reasoning-effort: unknown effort level 'max'; use one of: xhigh, high, medium, low"}` on stdout. `interpretGrokResult` therefore produced `status: 0` with the error text as `finalMessage`, and the companion recorded a **completed** job whose "answer" is the error string — the same silent-completion class as GROK-006. (The earlier registry note "the run fails" understated it: the run *pretends to succeed*.)
+
+### Fix (1.0.12)
+
+`runGrokTurn` detects the CLI's unknown-effort error (both the structured JSON channel and the stderr fallback) and retries once at the closest supported level taken from the CLI's own `use one of:` list — walking down the ranking `max → xhigh → high → medium → low` from the requested level, so `max` lands on `xhigh` where available and on `high` otherwise, with the downgrade logged to the job log via progress. If the error somehow persists after the retry, the result is forced to `status: 1` so it fails loud instead of completing with garbage. Applies to every pathway (task, review, foreground, background) since all funnel through `runGrokTurn`.
+
+### Verification
+
+Unit tests cover both error channels, the null case on normal answers, and the downgrade selection for the observed 4.5/4.6 matrices. Live: `--effort max` on 4.6 now downgrades to `xhigh` and answers; `--effort xhigh` on 4.5 downgrades to `high` and answers.
+
+---
+
 ## GROK-004: `state.json` is an unlocked multi-process read-modify-write; concurrent writers can lose updates
 
 - Date recorded: 2026-08-10 (surfaced by cross-family review during GROK-002; the same mechanism underlies the cross-plugin clobber risk reported in [openai/codex-plugin-cc#631](https://github.com/openai/codex-plugin-cc/issues/631))

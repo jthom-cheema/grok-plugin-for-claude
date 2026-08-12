@@ -87,6 +87,75 @@ export function normalizeEffort(effort) {
   return normalized;
 }
 
+// Effort support varies by MODEL, not just CLI version (grok-4.6 accepts
+// xhigh but not max; grok-4.5 accepts neither), and the CLI reports an
+// unsupported level with EXIT 0 and the error as its only output — which
+// would otherwise record as a completed run whose "answer" is the error
+// string (FINDINGS.md GROK-005). These helpers detect that error and pick
+// the closest supported downgrade from the CLI's own authoritative list.
+const EFFORT_RANKING = ["max", "xhigh", "high", "medium", "low"];
+const EFFORT_ERROR_RE =
+  /--effort\/--reasoning-effort: unknown effort level '([^']+)'; use one of: ([a-z,\s]+)/;
+
+export function parseEffortError(result) {
+  const candidates = [
+    result?.parsed && result.parsed.type === "error" ? result.parsed.message : null,
+    result?.finalMessage
+  ];
+  for (const candidate of candidates) {
+    const match = typeof candidate === "string" ? candidate.match(EFFORT_ERROR_RE) : null;
+    if (match) {
+      return {
+        requested: match[1],
+        supported: match[2]
+          .split(",")
+          .map((level) => level.trim())
+          .filter(Boolean)
+      };
+    }
+  }
+  return null;
+}
+
+export function pickSupportedEffort(requested, supported) {
+  const start = EFFORT_RANKING.indexOf(requested);
+  for (const level of EFFORT_RANKING.slice(start >= 0 ? start : 0)) {
+    if (supported.includes(level)) {
+      return level;
+    }
+  }
+  return supported[0] ?? null;
+}
+
+// Completion-sentinel support for delegated tasks. Grok drops tool calls on
+// complex briefs — it emits a planning message with no tool call, and the
+// CLI's headless mode treats any no-tool-call assistant message as the final
+// answer and exits 0 (FINDINGS.md GROK-006; spans grok-4.5 and grok-4.6).
+// When a caller declares the brief's completion sentinel, a "completed" run
+// whose output lacks it is not a completion: the session is resumed (the
+// thread survives) up to SENTINEL_MAX_RESUMES times, then failed loud.
+export const SENTINEL_MAX_RESUMES = 2;
+
+// Line-anchored on purpose: the harness convention is a sentinel on its own
+// line, so a substring hit inside prose does not count.
+export function outputHasSentinel(text, sentinel) {
+  if (!sentinel) {
+    return true;
+  }
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .some((line) => line.trim() === sentinel);
+}
+
+export function buildSentinelResumePrompt(sentinel) {
+  return [
+    "Your previous reply ended without the required completion sentinel, so the task is not finished.",
+    "Continue the task from where you left off.",
+    "Every message before the final answer must contain a tool call — never stop on a planning or narration message.",
+    `When the task is genuinely complete, end your final message with "${sentinel}" on its own line.`
+  ].join(" ");
+}
+
 export function parseGrokJsonOutput(stdout) {
   const trimmed = String(stdout ?? "").trim();
   if (!trimmed) {
@@ -219,11 +288,39 @@ export function runGrokTurn(cwd, options = {}) {
       throw result.error;
     }
 
-    const interpreted = interpretGrokResult({
+    let interpreted = interpretGrokResult({
       stdout: result.stdout,
       stderr: result.stderr,
       status: result.status
     });
+
+    // Unsupported-effort runs exit 0 with the error as their only output
+    // (FINDINGS.md GROK-005). Retry once at the closest level the CLI itself
+    // says is supported; if the error persists anyway, force a failure so it
+    // can never record as a completed run.
+    const effortError = parseEffortError(interpreted);
+    if (effortError && options.effort && !options._effortRetried) {
+      const fallback = pickSupportedEffort(effortError.requested, effortError.supported);
+      if (fallback && fallback !== effortError.requested) {
+        options.onProgress?.({
+          message: `Effort "${effortError.requested}" is not supported by this model (CLI offers: ${effortError.supported.join(", ")}); retrying at "${fallback}".`
+        });
+        return runGrokTurn(cwd, {
+          ...options,
+          promptFile,
+          effort: fallback,
+          _effortRetried: true
+        });
+      }
+    }
+    if (interpreted.status === 0 && parseEffortError(interpreted)) {
+      interpreted = {
+        ...interpreted,
+        status: 1,
+        failureMessage:
+          interpreted.finalMessage || "Grok rejected the requested effort level."
+      };
+    }
 
     options.onProgress?.({
       message:

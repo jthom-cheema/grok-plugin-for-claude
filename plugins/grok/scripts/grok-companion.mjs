@@ -10,13 +10,16 @@ import { parseArgs, splitRawArgumentString } from "./lib/args.mjs";
 import { readStdinIfPiped } from "./lib/fs.mjs";
 import { collectReviewContext, ensureGitRepository, resolveReviewTarget } from "./lib/git.mjs";
 import {
+  buildSentinelResumePrompt,
   DEFAULT_CONTINUE_PROMPT,
   findLatestTaskSessionId,
   getGrokAuthStatus,
   getGrokAvailability,
   getSessionRuntimeStatus,
   normalizeEffort,
-  runGrokTurn
+  outputHasSentinel,
+  runGrokTurn,
+  SENTINEL_MAX_RESUMES
 } from "./lib/grok.mjs";
 import {
   buildSingleJobSnapshot,
@@ -83,7 +86,7 @@ function printUsage() {
       "Usage:",
       "  node scripts/grok-companion.mjs setup [--json]",
       "  node scripts/grok-companion.mjs review [--wait|--background] [--disable-web-search|--no-web|--web] [--base <ref>] [--scope <auto|working-tree|branch>]",
-      "  node scripts/grok-companion.mjs task [--background] [--write] [--disable-web-search|--no-web|--web] [--resume-last|--resume|--fresh] [--model <model>] [--effort <low|medium|high|xhigh|max>] [prompt]",
+      "  node scripts/grok-companion.mjs task [--background] [--write] [--disable-web-search|--no-web|--web] [--resume-last|--resume|--fresh] [--model <model>] [--effort <low|medium|high|xhigh|max>] [--sentinel <text>] [prompt]",
       "  node scripts/grok-companion.mjs status [job-id] [--all] [--json]",
       "  node scripts/grok-companion.mjs result [job-id] [--json]",
       "  node scripts/grok-companion.mjs cancel [job-id] [--json]",
@@ -290,7 +293,10 @@ async function executeTaskRun(request) {
     throw new Error("Provide a prompt, a prompt file, piped stdin, or use --resume-last.");
   }
 
-  const result = runGrokTurn(workspaceRoot, {
+  const sentinel =
+    typeof request.sentinel === "string" && request.sentinel.trim() ? request.sentinel.trim() : null;
+
+  let result = runGrokTurn(workspaceRoot, {
     prompt,
     model: request.model,
     effort: request.effort,
@@ -300,24 +306,72 @@ async function executeTaskRun(request) {
     onProgress: request.onProgress
   });
 
+  // Grok drops tool calls on complex briefs: a planning message with no tool
+  // call ends the CLI's headless run with exit 0, recording narration as a
+  // "completed" job (FINDINGS.md GROK-006). When the caller declared the
+  // brief's completion sentinel, treat its absence as an unfinished run:
+  // resume the surviving session (hard cap SENTINEL_MAX_RESUMES), then fail
+  // loud rather than ever completing without it.
+  let resumesUsed = 0;
+  while (
+    sentinel &&
+    result.status === 0 &&
+    result.sessionId &&
+    !outputHasSentinel(result.finalMessage, sentinel) &&
+    resumesUsed < SENTINEL_MAX_RESUMES
+  ) {
+    resumesUsed += 1;
+    request.onProgress?.({
+      message: `Output is missing the completion sentinel "${sentinel}" — resuming session ${result.sessionId} (resume ${resumesUsed}/${SENTINEL_MAX_RESUMES}).`,
+      phase: "resuming"
+    });
+    result = runGrokTurn(workspaceRoot, {
+      prompt: buildSentinelResumePrompt(sentinel),
+      model: request.model,
+      effort: request.effort,
+      write: Boolean(request.write),
+      disableWebSearch: Boolean(request.disableWebSearch),
+      resumeSessionId: result.sessionId,
+      onProgress: request.onProgress
+    });
+  }
+
   const rawOutput = result.finalMessage;
+  const sentinelSatisfied = outputHasSentinel(rawOutput, sentinel);
+  let exitStatus = result.status;
+  let failureMessage = result.failureMessage;
+  if (sentinel && exitStatus === 0 && !sentinelSatisfied) {
+    exitStatus = 1;
+    failureMessage = `Grok output never contained the required sentinel "${sentinel}" after ${resumesUsed} resume(s) — treating this narration-only completion as a failed run (FINDINGS.md GROK-006).`;
+    request.onProgress?.({ message: failureMessage, phase: "failed" });
+  }
+
   const rendered = renderTaskResult({
-    rawOutput,
-    failureMessage: result.failureMessage
+    rawOutput:
+      sentinel && !sentinelSatisfied
+        ? `${failureMessage}\n\n--- Partial output (sentinel missing) ---\n${rawOutput}`
+        : rawOutput,
+    failureMessage
   });
   const payload = {
-    status: result.status,
+    status: exitStatus,
     sessionId: result.sessionId,
     rawOutput,
-    stopReason: result.stopReason
+    stopReason: result.stopReason,
+    ...(sentinel
+      ? { sentinel: { value: sentinel, satisfied: sentinelSatisfied, resumesUsed } }
+      : {})
   };
 
   return {
-    exitStatus: result.status,
+    exitStatus,
     threadId: result.sessionId,
     payload,
     rendered,
-    summary: firstMeaningfulLine(rawOutput, firstMeaningfulLine(result.failureMessage, "Grok task finished.")),
+    summary:
+      sentinel && !sentinelSatisfied && exitStatus !== 0
+        ? firstMeaningfulLine(failureMessage, "Grok task failed without its sentinel.")
+        : firstMeaningfulLine(rawOutput, firstMeaningfulLine(failureMessage, "Grok task finished.")),
     jobTitle: request.resumeLast ? "Grok Resume" : "Grok Task",
     jobClass: "task",
     write: Boolean(request.write)
@@ -378,7 +432,7 @@ function resolveDisableWebSearchOption(workspaceRoot, options) {
   return resolveDisableWebSearch(workspaceRoot, options);
 }
 
-function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, disableWebSearch, jobId }) {
+function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, disableWebSearch, sentinel, jobId }) {
   return {
     cwd,
     model,
@@ -387,6 +441,7 @@ function buildTaskRequest({ cwd, model, effort, prompt, write, resumeLast, disab
     write,
     resumeLast,
     disableWebSearch,
+    sentinel,
     jobId
   };
 }
@@ -574,7 +629,7 @@ async function handleReview(argv) {
 
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
-    valueOptions: ["model", "effort", "cwd", "prompt-file"],
+    valueOptions: ["model", "effort", "cwd", "prompt-file", "sentinel"],
     booleanOptions: [
       "json",
       "write",
@@ -604,6 +659,7 @@ async function handleTask(argv) {
   }
   const write = Boolean(options.write);
   const disableWebSearch = resolveDisableWebSearchOption(workspaceRoot, options);
+  const sentinel = options.sentinel ? String(options.sentinel).trim() : null;
   const taskMetadata = buildTaskRunMetadata({ prompt, resumeLast });
 
   if (options.background) {
@@ -618,6 +674,7 @@ async function handleTask(argv) {
       write,
       resumeLast,
       disableWebSearch,
+      sentinel,
       jobId: job.id
     });
     const { payload } = enqueueBackgroundTask(cwd, job, request);
@@ -637,6 +694,7 @@ async function handleTask(argv) {
         write,
         resumeLast,
         disableWebSearch,
+        sentinel,
         jobId: job.id,
         onProgress: progress
       }),

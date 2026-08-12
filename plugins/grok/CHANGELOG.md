@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.12 — 2026-08-12
+
+**Reliability**
+- New `task --sentinel <text>`: declares the brief's completion sentinel. A run that exits 0 without the sentinel on its own line in the output is treated as unfinished — the surviving Grok session is resumed with a continue prompt (restating that every pre-final message must carry a tool call), hard-capped at 2 resumes, and then **failed loud** through the normal job-failure path instead of ever recording a narration-only "completed" job (see `FINDINGS.md` GROK-006; the underlying headless exit-on-no-tool-call behavior spans grok-4.5 and grok-4.6 and is being reported upstream). Callers that do not pass `--sentinel` are unchanged
+- Unsupported `--effort` levels no longer produce a "completed" run whose answer is the CLI's error string: the CLI rejects model-dependent levels with exit 0 (`xhigh` is valid on grok-4.6 but not grok-4.5; `max` is valid nowhere as of CLI 0.2.118), and `runGrokTurn` now detects that error on both output channels, retries once at the closest level the CLI itself offers (`max`→`xhigh` where available, else `high`), logs the downgrade, and forces a loud failure if the error persists (see `FINDINGS.md` GROK-005). Applies to task and review, foreground and background
+- Both fixes verified live against grok CLI 0.2.118: `--effort max` on 4.6 downgrades to `xhigh` and answers, `--effort xhigh` on 4.5 downgrades to `high` and answers, sentinel-satisfied runs pass through unchanged; 9 new unit tests (54 total)
+
 ## 1.0.11 — 2026-08-10
 
 **Reliability**
