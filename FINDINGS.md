@@ -7,7 +7,7 @@ Defect and reliability findings observed while running this plugin inside the Ch
 ## GROK-006: headless runs record narration-only output as a completed job — the CLI exits 0 at any no-tool-call assistant message
 
 - Date recorded: 2026-08-12
-- Status: mitigated in 1.0.12 (opt-in `--sentinel`); underlying CLI/model behavior is upstream (report to xai-org/grok-build drafted from this evidence)
+- Status: mitigated in 1.0.12 (opt-in `--sentinel`); underlying CLI/model behavior is upstream. Not reported publicly — the CLI repo (xai-org/grok-build) has issues disabled and names no bug channel, and the decision 2026-08-12 was to keep the evidence here rather than file through an adjacent venue. This entry is the canonical record
 - Environment: Windows 11 Pro 10.0.26200; plugin 1.0.11; grok CLI 0.2.118 (shipped 2026-07-31); models grok-4.5 AND grok-4.6 (4.6 became this login's CLI default ~2026-08-12)
 - Claude Code session: `69a58c8f-4122-489f-8b37-20cb8a34ace1` (trailer-managment)
 
